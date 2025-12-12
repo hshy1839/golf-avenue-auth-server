@@ -8,6 +8,9 @@ const { testFirebaseConnection } = require('./src/config/firebaseAdmin');
 
 const app = express();
 
+// ─────────────────────────────
+//  미들웨어 & 라우트
+// ─────────────────────────────
 app.use(cors());
 app.use(express.json());
 
@@ -20,23 +23,27 @@ app.get('/', (req, res) => {
 
 const PORT = process.env.PORT || 4000;
 
+// ─────────────────────────────
+//  부팅 로직 (Firebase 체크 + listen)
+// ─────────────────────────────
 async function bootstrap() {
   try {
     console.log('🔥 서버 부팅 시작 (Firebase 연결 테스트 중)...');
-    await testFirebaseConnection(); // 👉 여기서 Firebase/Firestore 체크
+    await testFirebaseConnection();
 
     console.log('🚀 Firebase OK, Express 서버 시작합니다...');
     app.listen(PORT, () => {
       console.log(`✅ Server running on port ${PORT}`);
     });
   } catch (err) {
-    console.error('💥 서버 시작 중단: Firebase 연결에 실패했습니다.');
-    // 필요하면 여기서 슬랙/메일 알림 같은 것도 훅으로 붙일 수 있음
+    console.error('💥 서버 시작 중단: Firebase 연결에 실패했습니다.', err);
     process.exit(1);
   }
 }
 
-// 예외 캐치 (안 잡힌 Promise 에러 방지)
+// ─────────────────────────────
+//  예외 캐치
+// ─────────────────────────────
 process.on('unhandledRejection', (reason) => {
   console.error('UNHANDLED REJECTION:', reason);
 });
@@ -46,4 +53,12 @@ process.on('uncaughtException', (err) => {
   process.exit(1);
 });
 
-bootstrap();
+// 🔥 여기 포인트
+// node server.js 로 "직접 실행"할 때만 bootstrap() 호출
+// Vercel이 빌드 과정에서 require('server.js') 할 때는 실행 안 됨
+if (require.main === module) {
+  bootstrap();
+}
+
+// Vercel / 테스트용으로 app export
+module.exports = app;
