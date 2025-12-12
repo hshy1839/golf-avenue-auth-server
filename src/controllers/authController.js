@@ -26,7 +26,7 @@ function buildUserPayload(userRecord) {
 }
 
 // ─────────────────────────────
-// 회원가입 (이메일/비번)
+// 회원가입 (이메일/비번) - 변경 없음
 // ─────────────────────────────
 const register = async (req, res) => {
   console.log('🟢 [register] called:', req.body);
@@ -68,7 +68,7 @@ const register = async (req, res) => {
 };
 
 // ─────────────────────────────
-// 이메일 로그인 (이메일/비번)
+// 이메일 로그인 (이메일/비번) - 변경 없음
 // ─────────────────────────────
 const login = async (req, res) => {
   console.log('🟠 [login] called:', req.body);
@@ -134,7 +134,7 @@ const login = async (req, res) => {
 };
 
 // ─────────────────────────────
-// 구글 로그인 (Flutter에서 idToken 전달)
+// 구글 로그인 (Flutter에서 idToken 전달) - 수정됨
 // ─────────────────────────────
 const googleLogin = async (req, res) => {
   console.log('🟢 [googleLogin] called');
@@ -159,25 +159,43 @@ const googleLogin = async (req, res) => {
     const name = payload.name;
     const picture = payload.picture;
 
-    const uid = `google:${sub}`;
-
+    const socialUid = `google:${sub}`;
     let userRecord;
+    let finalUid = socialUid;
+
     try {
-      userRecord = await auth.getUser(uid);
+      // 1. 소셜 로그인 전용 UID로 사용자 검색 (이미 소셜로 가입한 경우)
+      userRecord = await auth.getUser(socialUid);
     } catch (e) {
       if (e.code === 'auth/user-not-found') {
-        userRecord = await auth.createUser({
-          uid,
-          email,
-          displayName: name,
-          photoURL: picture,
-        });
+        
+        // 2. 소셜 UID가 없다면, 이메일로 사용자 검색 (기존 이메일 계정 연동 처리)
+        const usersByEmail = await auth.getUsers([{ email: email }]);
+
+        if (usersByEmail.users.length > 0) {
+          // 2-1. 해당 이메일을 가진 기존 계정이 있다면, 기존 계정 사용
+          userRecord = usersByEmail.users[0];
+          finalUid = userRecord.uid; // 기존 계정의 UID 사용
+          console.log(`✅ [googleLogin] Email match found. Using existing UID: ${finalUid}`);
+          
+        } else {
+          // 3. 기존 계정도 없다면, 새로운 계정 생성
+          userRecord = await auth.createUser({
+            uid: socialUid,
+            email,
+            displayName: name,
+            photoURL: picture,
+          });
+          finalUid = socialUid;
+          console.log(`✨ [googleLogin] New user created with UID: ${finalUid}`);
+        }
       } else {
         throw e;
       }
     }
 
-    const customToken = await auth.createCustomToken(uid);
+    // 최종적으로 결정된 UID(기존 or 새로 생성)를 사용합니다.
+    const customToken = await auth.createCustomToken(finalUid);
 
     return res.json({
       ok: true,
@@ -196,7 +214,7 @@ const googleLogin = async (req, res) => {
 };
 
 // ─────────────────────────────
-// 카카오 로그인 (Flutter에서 accessToken 전달)
+// 카카오 로그인 (Flutter에서 accessToken 전달) - 수정됨
 // ─────────────────────────────
 const kakaoLogin = async (req, res) => {
   console.log('🟡 [kakaoLogin] called');
@@ -228,24 +246,51 @@ const kakaoLogin = async (req, res) => {
     const email = kakaoAccount.email;
     const nickname = profile.nickname;
 
-    const uid = `kakao:${kakaoId}`;
-
+    const socialUid = `kakao:${kakaoId}`;
     let userRecord;
+    let finalUid = socialUid;
+
     try {
-      userRecord = await auth.getUser(uid);
+      // 1. 소셜 로그인 전용 UID로 사용자 검색
+      userRecord = await auth.getUser(socialUid);
     } catch (e) {
       if (e.code === 'auth/user-not-found') {
-        userRecord = await auth.createUser({
-          uid,
-          email,
-          displayName: nickname,
-        });
+        
+        // 2. 소셜 UID가 없다면, 이메일로 사용자 검색 (이메일이 있다면)
+        if (email) {
+          const usersByEmail = await auth.getUsers([{ email: email }]);
+
+          if (usersByEmail.users.length > 0) {
+            // 2-1. 해당 이메일을 가진 기존 계정이 있다면, 기존 계정 사용
+            userRecord = usersByEmail.users[0];
+            finalUid = userRecord.uid; // 기존 계정의 UID 사용
+            console.log(`✅ [kakaoLogin] Email match found. Using existing UID: ${finalUid}`);
+            
+          } else {
+            // 3. 기존 계정도 없다면, 새로운 계정 생성
+            userRecord = await auth.createUser({
+              uid: socialUid,
+              email,
+              displayName: nickname,
+            });
+            finalUid = socialUid;
+            console.log(`✨ [kakaoLogin] New user created with UID: ${finalUid}`);
+          }
+        } else {
+             // 3-2. 카카오 계정에 이메일이 없는 경우, 소셜 UID로 새 계정 생성
+             userRecord = await auth.createUser({
+              uid: socialUid,
+              displayName: nickname,
+            });
+            finalUid = socialUid;
+            console.log(`✨ [kakaoLogin] New user created (no email) with UID: ${finalUid}`);
+        }
       } else {
         throw e;
       }
     }
 
-    const customToken = await auth.createCustomToken(uid);
+    const customToken = await auth.createCustomToken(finalUid);
 
     return res.json({
       ok: true,
