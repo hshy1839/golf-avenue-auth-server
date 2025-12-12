@@ -9,36 +9,22 @@ const {
   kakaoLogin,
 } = require('../controllers/authController');
 
-
-// 🔥 모든 요청 로깅 미들웨어
+// 🔥 모든 요청 로깅
 router.use((req, res, next) => {
   console.log(`📥 [AUTH ROUTE HIT] ${req.method} ${req.originalUrl}`);
   next();
 });
 
-// -------------------------------
 // 회원가입
-// -------------------------------
-router.post('/register', (req, res) => {
-  console.log("🚀 Register endpoint triggered");
-  register(req, res);
-});
+router.post('/register', register);
 
-// -------------------------------
-// 로그인
-// -------------------------------
-router.post('/login', (req, res) => {
-  console.log("🚀 Login endpoint triggered");
-  login(req, res);
-});
+// 이메일 로그인
+router.post('/login', login);
 
-// -------------------------------
 // 구글 로그인
-// -------------------------------
-router.post('/google', (req, res) => {
-  console.log("🚀 Google Login endpoint triggered");
-  googleLogin(req, res);
-});
+router.post('/google', googleLogin);
+
+// 카카오 로그인
 router.post('/kakao', kakaoLogin);
 
 module.exports = router;

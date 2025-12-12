@@ -1,54 +1,38 @@
-// firebaseAdmin.js
+// src/config/firebaseAdmin.js
 const admin = require('firebase-admin');
-const path = require('path');
 
-let serviceAccount;
-
-/**
- * 1) 프로덕션 환경(Vercel/Render)이라면 환경변수에서 JSON 로드
- * 2) 로컬 개발환경이면 serviceAccountKey.json 파일 사용
- */
-if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
-  console.log('🔥 Using GOOGLE_SERVICE_ACCOUNT_KEY from environment');
-  try {
-    serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
-  } catch (err) {
-    console.error('❌ Failed to parse GOOGLE_SERVICE_ACCOUNT_KEY:', err);
-    throw err;
-  }
-} else {
-  console.log('🔥 Using local serviceAccountKey.json file');
-  serviceAccount = require(path.join(__dirname, 'serviceAccountKey.json'));
+if (!process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
+  throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY env is required');
 }
 
-// Firebase 초기화 (중복 초기화 방지)
+let serviceAccountJson;
+
+try {
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_KEY.trim();
+
+  // ✅ base64 또는 raw JSON 둘 다 지원
+  const decoded =
+    raw.startsWith('{') || raw.startsWith('{"')
+      ? raw
+      : Buffer.from(raw, 'base64').toString('utf8');
+
+  serviceAccountJson = JSON.parse(decoded);
+} catch (e) {
+  console.error('❌ Failed to parse GOOGLE_SERVICE_ACCOUNT_KEY:', e);
+  throw e;
+}
+
 if (!admin.apps.length) {
   admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
+    credential: admin.credential.cert(serviceAccountJson),
   });
 }
 
-const db = admin.firestore();
+const auth = admin.auth();
 
-/**
- * 서버 시작 시 Firebase 연결 테스트
- */
 async function testFirebaseConnection() {
-  try {
-    await admin.auth().listUsers(1);
-    console.log('✅ Firebase Auth 연결 성공');
-
-    const now = new Date();
-    await db
-      .collection('_health')
-      .doc('startup')
-      .set({ lastStartupCheck: now }, { merge: true });
-
-    console.log('✅ Firestore Health Check 성공');
-  } catch (err) {
-    console.error('❌ Firebase 연결 테스트 실패:', err);
-    throw err;
-  }
+  await auth.listUsers(1);
+  console.log('✅ Firebase Admin 연결 OK');
 }
 
-module.exports = { admin, db, testFirebaseConnection };
+module.exports = { admin, auth, testFirebaseConnection };

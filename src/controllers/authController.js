@@ -1,348 +1,277 @@
 // src/controllers/authController.js
 const axios = require('axios');
-const { admin, db } = require('../config/firebaseAdmin');
-const { createUserJson } = require('../model/user.model');
+const { auth } = require('../config/firebaseAdmin');
 const { OAuth2Client } = require('google-auth-library');
 
 const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 
+if (!FIREBASE_API_KEY) {
+  throw new Error('FIREBASE_API_KEY env is required');
+}
+if (!GOOGLE_CLIENT_ID) {
+  console.warn('⚠ GOOGLE_CLIENT_ID not set – Google login will fail.');
+}
+
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
-// -------------------------
-// 이메일 회원가입
-// -------------------------
+function buildUserPayload(userRecord) {
+  return {
+    uid: userRecord.uid,
+    email: userRecord.email,
+    displayName: userRecord.displayName,
+    phoneNumber: userRecord.phoneNumber,
+    photoURL: userRecord.photoURL,
+  };
+}
+
+// ─────────────────────────────
+// 회원가입 (이메일/비번)
+// ─────────────────────────────
 const register = async (req, res) => {
+  console.log('🟢 [register] called:', req.body);
+
   try {
-    const { email, password, name, nickname, phone, birthdate, gender } = req.body;
+    const { email, password, name, nickname, phone } = req.body;
 
     if (!email || !password) {
-      return res.status(400).json({ ok: false, message: "email, password required" });
+      return res
+        .status(400)
+        .json({ ok: false, message: 'email_and_password_required' });
     }
 
-    const userRecord = await admin.auth().createUser({
+    const displayName = nickname || name || email.split('@')[0];
+
+    const userRecord = await auth.createUser({
       email,
       password,
-      displayName: nickname || name || "",
+      displayName,
+      phoneNumber: phone || undefined,
     });
 
-    const uid = userRecord.uid;
+    const customToken = await auth.createCustomToken(userRecord.uid);
 
-    const userJson = createUserJson({
-      uid,
-      email,
-      name,
-      nickname,
-      phone,
-      birthdate,
-      gender,
-    });
-
-    await db.collection("users").doc(uid).set(userJson, { merge: true });
-
-    const customToken = await admin.auth().createCustomToken(uid);
-
-    res.json({
+    return res.status(201).json({
       ok: true,
+      message: 'register_success',
+      user: buildUserPayload(userRecord),
       customToken,
-      user: userJson,
     });
   } catch (err) {
-    console.error("[register] Error:", err);
-    return res.status(500).json({ ok: false, error: err.message });
+    console.error('🔴 [register] ERROR:', err);
+    return res.status(500).json({
+      ok: false,
+      message: 'register_failed',
+      error: err.message || String(err),
+    });
   }
 };
 
-// -------------------------
-// 이메일 로그인
-// -------------------------
+// ─────────────────────────────
+// 이메일 로그인 (이메일/비번)
+// ─────────────────────────────
 const login = async (req, res) => {
+  console.log('🟠 [login] called:', req.body);
+
   try {
     const { email, password } = req.body;
 
-    const url = `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_API_KEY}`;
+    if (!email || !password) {
+      return res
+        .status(400)
+        .json({ ok: false, message: 'email_and_password_required' });
+    }
 
-    const { data } = await axios.post(url, {
-      email,
-      password,
-      returnSecureToken: true,
-    });
+    // Firebase Identity Toolkit으로 이메일/비번 검증
+    const fbRes = await axios.post(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_API_KEY}`,
+      {
+        email,
+        password,
+        returnSecureToken: true,
+      }
+    );
 
-    const uid = data.localId;
-    const customToken = await admin.auth().createCustomToken(uid);
+    const { localId } = fbRes.data; // Firebase Auth UID
+
+    // Admin SDK에서 사용자 조회 (없으면 생성)
+    let userRecord;
+    try {
+      userRecord = await auth.getUser(localId);
+    } catch (e) {
+      if (e.code === 'auth/user-not-found') {
+        userRecord = await auth.createUser({
+          uid: localId,
+          email,
+        });
+      } else {
+        throw e;
+      }
+    }
+
+    const customToken = await auth.createCustomToken(userRecord.uid);
 
     return res.json({
       ok: true,
+      message: 'login_success',
+      user: buildUserPayload(userRecord),
       customToken,
-      uid,
-      email: data.email,
     });
   } catch (err) {
-    return res.status(401).json({
+    console.error('🔴 [login] ERROR:', err.response?.data || err);
+
+    const status =
+      err.response?.status && err.response.status !== 200
+        ? err.response.status
+        : 500;
+
+    return res.status(status).json({
       ok: false,
-      error: err.response?.data || err.message,
+      message: 'login_failed',
+      error: err.response?.data || err.message || String(err),
     });
   }
 };
 
-// -------------------------
-// 구글 로그인
-// -------------------------
+// ─────────────────────────────
+// 구글 로그인 (Flutter에서 idToken 전달)
+// ─────────────────────────────
 const googleLogin = async (req, res) => {
+  console.log('🟢 [googleLogin] called');
+
   try {
     const { idToken } = req.body;
 
     if (!idToken) {
-      return res.status(400).json({ ok: false, message: "idToken required" });
+      return res
+        .status(400)
+        .json({ ok: false, message: 'idToken_required' });
     }
 
-    // 1) 구글 토큰 검증
     const ticket = await googleClient.verifyIdToken({
       idToken,
       audience: GOOGLE_CLIENT_ID,
     });
-
     const payload = ticket.getPayload();
-    const googleUid = payload.sub;
-    const email = payload.email;
-    const name = payload.name || "";
-    const picture = payload.picture || "";
 
-    if (!email) {
-      return res.status(400).json({
-        ok: false,
-        message: "Google account has no email.",
-      });
-    }
+    const sub = payload.sub;
+    const email = payload.email;
+    const name = payload.name;
+    const picture = payload.picture;
+
+    const uid = `google:${sub}`;
 
     let userRecord;
-    let isNewUser = false;
-
-    // 2) 이메일 기준으로 먼저 기존 유저 있는지 체크
     try {
-      userRecord = await admin.auth().getUserByEmail(email);
-
-      // 선택: displayName / photoURL이 비어있으면 업데이트
-      const updateData = {};
-      if (!userRecord.displayName && name) updateData.displayName = name;
-
-      if (Object.keys(updateData).length > 0) {
-        userRecord = await admin.auth().updateUser(userRecord.uid, updateData);
-      }
+      userRecord = await auth.getUser(uid);
     } catch (e) {
-      if (e.code === "auth/user-not-found") {
-        // 3) 없으면 새 구글 계정으로 생성
-        isNewUser = true;
-        userRecord = await admin.auth().createUser({
-          uid: `google:${googleUid}`, // 새로 만드는 경우에만 google:sub 사용
+      if (e.code === 'auth/user-not-found') {
+        userRecord = await auth.createUser({
+          uid,
           email,
           displayName: name,
+          photoURL: picture,
         });
       } else {
-        throw e; // 다른 에러는 그대로 던짐
+        throw e;
       }
     }
 
-    const uid = userRecord.uid;
-
-    // 4) Firestore 유저 문서 upsert
-    const userJson = createUserJson({
-      uid,
-      email,
-      name,
-      nickname: name,
-      provider: "google", // 기존 이메일 회원이어도 지금은 구글 로그인으로 들어온 것
-      // 필요하면 isNewUser로 신규/기존 분기해서 다른 필드도 줄 수 있음
-    });
-
-    await db.collection("users").doc(uid).set(userJson, { merge: true });
-
-    // 5) 커스텀 토큰 발급
-    const customToken = await admin.auth().createCustomToken(uid);
+    const customToken = await auth.createCustomToken(uid);
 
     return res.json({
       ok: true,
+      message: 'google_login_success',
+      user: buildUserPayload(userRecord),
       customToken,
-      user: userJson,
-      isNewUser,
     });
   } catch (err) {
-    console.error("[googleLogin] error:", err);
-    return res.status(500).json({ ok: false, error: err.message });
+    console.error('🔴 [googleLogin] ERROR:', err.response?.data || err);
+    return res.status(500).json({
+      ok: false,
+      message: 'google_login_failed',
+      error: err.message || String(err),
+    });
   }
 };
 
-// -------------------------
-// 카카오 로그인
-// -------------------------
+// ─────────────────────────────
+// 카카오 로그인 (Flutter에서 accessToken 전달)
+// ─────────────────────────────
 const kakaoLogin = async (req, res) => {
+  console.log('🟡 [kakaoLogin] called');
+
   try {
     const { accessToken } = req.body;
 
     if (!accessToken) {
       return res
         .status(400)
-        .json({ ok: false, message: "accessToken required" });
+        .json({ ok: false, message: 'accessToken_required' });
     }
 
-    // 1) 카카오 사용자 정보 불러오기
-    const kakaoUserRes = await axios.get(
-      "https://kapi.kakao.com/v2/user/me",
+    // Kakao 유저 정보 조회
+    const kakaoRes = await axios.get(
+      'https://kapi.kakao.com/v2/user/me',
       {
         headers: {
           Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
         },
       }
     );
 
-    const kakaoUser = kakaoUserRes.data;
-    const kakaoUid = kakaoUser.id.toString();
-
-    const kakaoAccount = kakaoUser.kakao_account || {};
+    const kakaoData = kakaoRes.data;
+    const kakaoId = kakaoData.id;
+    const kakaoAccount = kakaoData.kakao_account || {};
     const profile = kakaoAccount.profile || {};
 
-    const email = kakaoAccount.email || null;
+    const email = kakaoAccount.email;
+    const nickname = profile.nickname;
 
-    // 🔥 카카오 쪽 닉네임 우선순위대로 가져오기
-    const kakaoNickname =
-      profile.nickname || // 보통 여기 들어옴
-      kakaoAccount.name ||
-      (kakaoUser.properties && kakaoUser.properties.nickname) ||
-      `카카오사용자_${kakaoUid}`;
-
-    // name / nickname 을 전부 카카오 닉네임으로 통일
-    const name = kakaoNickname;
-
-    // 프로필 이미지도 가능하면 가져오되, 유효한 URL일 때만 사용
-    const rawPicture =
-      profile.profile_image_url ||
-      (kakaoUser.properties && kakaoUser.properties.profile_image) ||
-      "";
-    const safePhotoURL = isValidPhotoUrl(rawPicture) ? rawPicture : undefined;
+    const uid = `kakao:${kakaoId}`;
 
     let userRecord;
-    let isNewUser = false;
-
-    // 2) 이메일이 있는 경우 → 이메일 기반으로 기존 계정 병합
-    if (email) {
-      try {
-        // 기존 사용자 확인
-        userRecord = await admin.auth().getUserByEmail(email);
-
-        // displayName / photoURL 업데이트 (비어 있을 때만)
-        const updateData = {};
-        if (!userRecord.displayName && name) {
-          updateData.displayName = name;
-        }
-        if (!userRecord.photoURL && safePhotoURL) {
-          updateData.photoURL = safePhotoURL;
-        }
-
-        if (Object.keys(updateData).length > 0) {
-          userRecord = await admin.auth().updateUser(
-            userRecord.uid,
-            updateData
-          );
-        }
-      } catch (e) {
-        if (e.code === "auth/user-not-found") {
-          // 👉 새로운 이메일 유저 생성
-          isNewUser = true;
-
-          const createData = {
-            uid: `kakao:${kakaoUid}`,
-            email,
-            displayName: name, // ✅ 카카오 닉네임
-          };
-          if (safePhotoURL) {
-            createData.photoURL = safePhotoURL;
-          }
-
-          userRecord = await admin.auth().createUser(createData);
-        } else {
-          throw e;
-        }
-      }
-    } else {
-      // 3) 이메일이 없는 경우 → kakao:ID 기반으로 계정 관리
-      const kakaoUidKey = `kakao:${kakaoUid}`;
-      try {
-        userRecord = await admin.auth().getUser(kakaoUidKey);
-
-        const updateData = {};
-        if (!userRecord.displayName && name) {
-          updateData.displayName = name;
-        }
-        if (!userRecord.photoURL && safePhotoURL) {
-          updateData.photoURL = safePhotoURL;
-        }
-
-        if (Object.keys(updateData).length > 0) {
-          userRecord = await admin.auth().updateUser(
-            userRecord.uid,
-            updateData
-          );
-        }
-      } catch (e) {
-        if (e.code === "auth/user-not-found") {
-          isNewUser = true;
-
-          const createData = {
-            uid: kakaoUidKey,
-            displayName: name, // ✅ 카카오 닉네임
-          };
-          if (safePhotoURL) {
-            createData.photoURL = safePhotoURL;
-          }
-
-          userRecord = await admin.auth().createUser(createData);
-        } else {
-          throw e;
-        }
+    try {
+      userRecord = await auth.getUser(uid);
+    } catch (e) {
+      if (e.code === 'auth/user-not-found') {
+        userRecord = await auth.createUser({
+          uid,
+          email,
+          displayName: nickname,
+        });
+      } else {
+        throw e;
       }
     }
 
-    const uid = userRecord.uid;
-
-    // 4) Firestore 저장 JSON
-    const userJson = createUserJson({
-      uid,
-      email,
-      name,           // ✅ name = 카카오 닉네임
-      nickname: name, // ✅ nickname = 카카오 닉네임
-      provider: "kakao",
-    });
-
-    await db.collection("users").doc(uid).set(userJson, { merge: true });
-
-    // 5) Firebase Custom Token 발급
-    const customToken = await admin.auth().createCustomToken(uid);
+    const customToken = await auth.createCustomToken(uid);
 
     return res.json({
       ok: true,
+      message: 'kakao_login_success',
+      user: buildUserPayload(userRecord),
       customToken,
-      user: userJson,
-      isNewUser,
     });
   } catch (err) {
-    console.error("[kakaoLogin] error:", err.response?.data || err);
-    return res.status(500).json({
+    console.error('🔴 [kakaoLogin] ERROR:', err.response?.data || err);
+
+    const status =
+      err.response?.status && err.response.status !== 200
+        ? err.response.status
+        : 500;
+
+    return res.status(status).json({
       ok: false,
-      error: err.response?.data || err.message,
+      message: 'kakao_login_failed',
+      error: err.response?.data || err.message || String(err),
     });
   }
 };
-function isValidPhotoUrl(url) {
-  if (!url || typeof url !== "string") return false;
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch (_) {
-    return false;
-  }
-}
 
-
-
-module.exports = { register, login, googleLogin, kakaoLogin };
+module.exports = {
+  register,
+  login,
+  googleLogin,
+  kakaoLogin,
+};
